@@ -74,8 +74,8 @@ fit1 <- cmd_mod$sample(data = mod_data,
                        chains = 4,
                        parallel_chains = 4,
                        refresh = 100,
-                       iter_sampling = 300,
-                       iter_warmup = 300)
+                       iter_sampling = 500,
+                       iter_warmup = 800)
 
 # Convert to mvgam
 out_gam_mod <- mvgam:::read_csv_as_stanfit(fit1$output_files())
@@ -87,6 +87,8 @@ plot(y = abund_linpred, x = temperature)
 
 mcmc_plot(mod_skeleton, variable = 'ar1', regex = TRUE,
           type = 'hist') # true = 0.7
+mcmc_plot(mod_skeleton, variable = 'sigma', regex = TRUE,
+          type = 'hist') # true = 0.1
 mcmc_plot(mod_skeleton, variable = 'rainfall',
           type = 'hist') # true = -0.65
 pairs(mod_skeleton, variable = c('(Intercept)', 'rainfall'))
@@ -105,7 +107,14 @@ hc <- hindcast(mod_skeleton, type = 'link')
 plot(hc)
 
 #### Notes ####
-# Will likely need a different Intercept prior for the observation model, as this
+# Will need a new family function nmix()
+# use family$family = 'nmix'
+# use family$link = 'log' for brms default priors to work well
+
+# Will need to allow non-dynamic process models (i.e. trend_model == 'None')
+# as an option, but only for this particular family
+
+# Will need a different Intercept prior for the observation model, as this
 # should relate to average detection probability rather than to the observed counts
 
 # Will have to think about how to calculate residuals 
