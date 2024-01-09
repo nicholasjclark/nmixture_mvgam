@@ -3,20 +3,22 @@ library(mvgam)
 
 # True abundance is predicted by a single nonlinear function of temperature
 # as well as a moderate autoregressive process
-set.seed(123)
-gamdat <- gamSim(n = 80)
+set.seed(55)
+gamdat <- gamSim(n = 160)
 N <- NROW(gamdat)
 abund_linpred <- as.vector(scale(gamdat$y))
 temperature <- gamdat$x2
 true_abund <- rpois(N,
                     exp(1.5 +
                           abund_linpred +
-                          mvgam:::sim_ar3(ar1 = 0.7, tau = 100, h = N)))
+                          mvgam:::sim_gp(rnorm(3, 0, 0.1),
+                                         alpha_gp = 0.5,
+                                         rho_gp = 12, h = N)))
 plot(true_abund ~ temperature)
 
 # Detection probability increases linearly with decreasing rainfall
 rainfall <- rnorm(N)
-detect_linpred <- 0.5 + -0.95 * rainfall
+detect_linpred <- 0.4 + -0.55 * rainfall
 detect_prob <- plogis(detect_linpred)
 
 # Simulate observed counts
@@ -33,38 +35,108 @@ model_dat <- data.frame(obs_abund,
                         rainfall,
                         cap = max(obs_abund) + 20,
                         time = 1:N,
-                        series = as.factor('series1'))
+                        series = as.factor('series1'),
+                        # May need to modify in stan_utils to ensure nmix
+                        # models can have intercepts on the abundance model
+                        # as well
+                        dummy = 1)
+
+# Add some missing observations
+model_dat$obs_abund[c(3,8,12)] <- NA
+
+# Training and testing
+data_train <- model_dat %>%
+  dplyr::filter(time <= 140)
+data_test <- model_dat %>%
+  dplyr::filter(time > 140)
 
 # Fit a model with a more useful prior on the rainfall coefficient
 mod <- mvgam(formula = obs_abund ~ rainfall,
-             trend_formula = ~ s(temperature, k = 7),
-             trend_model = AR(),
+             trend_formula = ~ s(temperature, k = 5) +
+               dummy +
+               gp(time, k = 15, c = 5/4),
+             trend_model = 'None',
              family = nmix(),
-             data = model_dat,
-             priors = prior(std_normal(), class = 'rainfall'))
+             data = data_train,
+             newdata = data_test,
+             priors = c(prior(std_normal(), class = 'dummy_trend'),
+                        prior(normal(-0.5, 1), class = 'Intercept'),
+                        prior(std_normal(), class = 'rainfall')),
+             chains = 4,
+             burnin = 600,
+             samples = 350,
+             run_model = TRUE)
 code(mod)
+
+# Ensure summary works (needs some work for some reason)
 summary(mod)
 
+# All standard plots should work
 plot(mod, type = 'smooths', trend_effects = TRUE)
+plot(mod, type = 'pterms')
 plot(mod, type = 'residuals')
-plot(mod, type = 'trend')
 plot(mod, type = 'forecast')
+plot(mod, type = 'trend')
+mcmc_plot(mod, variable = c('(Intercept)',
+                            'rainfall'),
+          type = 'hist')
 
-hc <- hindcast(mod, type = 'expected')
+# link hindcasts are the mean of the latent abundance
+hc <- hindcast(mod, type = 'link')
 plot(hc)
 
+# latent_N hindcast is the computed latent abundance
+hc <- hindcast(mod, type = 'latent_N')
+plot(hc)
+
+# Detection probabilities
+hc <- hindcast(mod, type = 'detection')
+plot(hc)
+plot(hc$hindcasts[[1]][1,] ~ rainfall[1:140])
+
+# Forecasts
+fc <- forecast(mod, type = 'latent_N')
+plot(fc)
+points(true_abund, pch = 16, cex = 0.8)
+range(fc$forecasts[[1]], na.rm = TRUE)
+
+fc <- forecast(mod, type = 'detection')
+plot(fc)
+points(detect_prob, pch = 16, cex = 0.8)
+
+# loo should also work, though need to do some testing to ensure
+# it is stable
 loo(mod)
 
+
+# This can be a bit confusing, as the detection probability effects
+# are difficult to visualise; it will be better if we can use specific
+# types in marginaleffects functions (type = 'detection' and type = 'latent_N')
 conditional_effects(mod, type = 'link')
-mcmc_plot(mod, variable = 'rainfall', type = 'hist')
+mcmc_plot(mod, variable = 'ar1', regex = TRUE, type = 'hist')
 
 # Need to allow different types in marginaleffects
 plot_predictions(mod, condition = list('rainfall',
                                        cap = 30),
                  type = 'detection')
 
-newdata <- data.frame(rainfall = runif(100, -2, 2),
+# Easy enough to plot some detection probability predictions
+newdata <- data.frame(rainfall = runif(100, min(rainfall), max(rainfall)),
                       cap = 30,
-                      temperature = mean(model_dat$temperature))
+                      temperature = mean(model_dat$temperature),
+                      dummy = 1)
 preds <- predict(mod, newdata = newdata, type = 'detection')
-plot(preds[1,] ~ newdata$rainfall)
+plot(preds[1,] ~ newdata$rainfall, pch = 16, col = 'white',
+     ylim = c(0, 1), ylab = 'Pr(detection)',
+     xlab = 'rainfall')
+for(i in 1:100){
+  lines(preds[i,] ~ newdata$rainfall,
+        col = 'grey70')
+}
+lines(y = data.frame(detect_prob, rainfall) %>%
+  dplyr::arrange(rainfall) %>%
+  dplyr::pull(detect_prob),
+  x = data.frame(detect_prob, rainfall) %>%
+    dplyr::arrange(rainfall) %>%
+    dplyr::pull(rainfall), lwd = 3)
+
