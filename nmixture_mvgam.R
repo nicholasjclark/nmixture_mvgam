@@ -1,152 +1,147 @@
 # Simulate data from a Poisson-Binomial N-Mixture model
 library(mvgam)
+myplot = function(...){
+  plot(..., bty = 'l', pch = 16,
+       col = 'gray30', cex = 0.8)
+  box(bty = 'l', lwd = 2)
+}
 
 # True abundance is predicted by a single nonlinear function of temperature
-# as well as a nonlinear long-term trend
-set.seed(123)
-gamdat <- gamSim(n = 80)
-N <- NROW(gamdat)
-abund_linpred <- gamdat$y
-plot(abund_linpred, type = 'l')
-temperature <- gamdat$x2
-trend <- mvgam:::sim_gp(rnorm(3, 0, 0.1),
-                        alpha_gp = 3,
-                        rho_gp = 16, h = N)
-plot(trend, type = 'l')
-true_abund <- floor(10 + abund_linpred + trend)
-plot(true_abund ~ temperature)
-plot(true_abund, type = 'l')
+# as well as a nonlinear long-term Gaussian Process trend
+set.seed(999)
+gamdat <- gamSim(n = 80); N <- NROW(gamdat)
+abund_linpred <- gamdat$y; temperature <- gamdat$x2
+myplot(abund_linpred ~ temperature)
+trend <-  mvgam:::sim_gp(rnorm(3, 0, 0.5),
+                        alpha_gp = 5,
+                        rho_gp = 14, h = N)
+plot(trend)
+true_abund <- floor(12 + abund_linpred + trend)
 
-# Detection probability increases linearly with decreasing rainfall
-rainfall <- rnorm(N)
-detect_linpred <- 0.4 + -0.55 * rainfall
+# Detection probability changes non-linearly with rainfall, which
+# is a highly seasonal variable
+rainfall <- sin(2 * pi * (1:N) / 12) +
+  0.5 * cos(2 * pi * (1:N) / 12) +
+  mvgam:::sim_gp(rnorm(3, 0, 0.1),
+                 alpha_gp = 0.1,
+                 rho_gp = 25, h = N)
+detect_linpred <- 0.7 + (1.25 * rainfall) +
+  (-0.90 * rainfall^2) + (-0.60 * rainfall^3)
 detect_prob <- plogis(detect_linpred)
+myplot(detect_prob ~ rainfall,
+       ylim = c(0, 1))
 
 # Simulate observed counts
 obs_abund <- rbinom(N, size = true_abund, prob = detect_prob)
-plot(obs_abund ~ temperature)
-plot(obs_abund ~ rainfall)
-plot(obs_abund ~ true_abund)
+
+# Plot true and observed time series
+plot(true_abund,
+     type = 'l',
+     ylab = 'Abundance',
+     xlab = 'Time',
+     ylim = c(0, max(true_abund)),
+     bty = 'l',
+     lwd = 2)
+box(bty = 'l', lwd = 2)
+lines(obs_abund, col = 'darkred', lwd = 2)
+title(main = 'True = black; observed = red')
 
 # Gather data into a dataframe suitable for mvgam modelling;
 # This will require a 'cap' variable specifying the maximum K to marginalise
-# over when estimating latent abundance
+# over when estimating latent abundance (it does NOT have to be a fixed value)
 model_dat <- data.frame(obs_abund,
                         temperature,
                         rainfall,
-                        cap = max(obs_abund) + 10,
+                        cap = max(obs_abund) + 20,
                         time = 1:N,
                         series = as.factor('series1'))
 
-# Add some missing observations
-model_dat$obs_abund[c(3,8,12)] <- NA
+# Training and testing folds
+data_train <- model_dat %>% dplyr::filter(time <= 75)
+data_test <- model_dat %>% dplyr::filter(time > 75)
 
-# Training and testing
-data_train <- model_dat %>%
-  dplyr::filter(time <= 70)
-data_test <- model_dat %>%
-  dplyr::filter(time > 70)
-
-# Ensure get_mvgam_priors() allows the trend intercept to be modified
-get_mvgam_priors(formula = obs_abund ~ s(rainfall, k = 4),
-                 trend_formula = ~ s(temperature, k = 5) +
-                   gp(time, k = 10, c = 5/4),
-                 trend_model = 'None',
-                 family = nmix(),
-                 data = data_train)
-
-# Fit a model with a more useful prior on the rainfall coefficient
-mod <- mvgam(formula = obs_abund ~ s(rainfall, k = 4),
-             trend_formula = ~ s(temperature, k = 5) +
-               gp(time, k = 10, c = 5/4),
-             trend_model = 'None',
+# Fit a model with informative priors on the two intercept parameters
+# and on the length scale of the GP temporal trend parameter
+# Note that the 'trend_formula' applies to the latent count process
+# (a Poisson process with log-link), while the 'formula' applies to the
+# detection probability (logit link)
+mod <- mvgam(formula = obs_abund ~ s(rainfall, k = 6),
+             trend_formula = ~ s(temperature, k = 6) +
+               gp(time, k = 12, c = 5/4, scale = FALSE),
              family = nmix(),
              data = data_train,
              newdata = data_test,
-             priors = c(prior(normal(-0.5, 1), class = '(Intercept)'),
-                        prior(std_normal(), class = '(Intercept)_trend')),
-             chains = 4,
-             burnin = 500,
-             samples = 350,
-             run_model = TRUE)
-code(mod)
+             priors = c(prior(std_normal(), class = '(Intercept)'),
+                        prior(normal(2, 2), class = '(Intercept)_trend'),
+                        prior(normal(12, 3), class = 'rho_gp_trend(time)')))
 
-# Ensure summary works (needs some work for some reason)
+# Model summary and diagnostics
 summary(mod)
-
-# All standard plots should work
-plot(mod, type = 'smooths', trend_effects = TRUE)
-plot(mod, type = 'smooths')
 plot(mod, type = 'residuals')
-plot(mod, type = 'forecast')
-plot(mod, type = 'trend')
+
+# Intercept parameters
 mcmc_plot(mod,
           variable = "Intercept",
           regex = TRUE,
           type = 'hist')
 
-# link hindcasts are the mean of the latent abundance process
-hc <- hindcast(mod, type = 'link')
-plot(hc)
-
-# latent_N hindcast is the computed latent abundance
-hc <- hindcast(mod, type = 'latent_N')
-plot(hc)
-
-# Detection probabilities
-hc <- hindcast(mod, type = 'detection')
-plot(hc)
-plot(hc$hindcasts[[1]][1,] ~ rainfall[1:70])
-
-# Forecasts of latent abundance should be restricted
-# based on the 'cap' variable in the data
+# Hindcasts and forecasts of latent abundance (with truth overlain)
 fc <- forecast(mod, type = 'latent_N')
-plot(fc)
-points(true_abund, pch = 16, cex = 0.8)
-range(fc$forecasts[[1]], na.rm = TRUE)
+plot(fc); points(true_abund, pch = 16, cex = 0.8)
 
-# Forecasts of detection probability
+# Latent abundance predictions are restricted based on 'cap'
+max(model_dat$cap); range(fc$forecasts[[1]])
+
+# Hindcasts and forecasts of detection probability (with truth overlain)
 fc <- forecast(mod, type = 'detection')
+plot(fc); points(detect_prob, pch = 16, cex = 0.8)
+
+# Hindcasts and forecasts of observations
+# (after accounting for detection error)
+fc <- forecast(mod, type = 'response')
 plot(fc)
-points(detect_prob, pch = 16, cex = 0.8)
 
-####                                                             ####
-# TO DO: Need to fit the model without test data and ensure forecasts
-# all work #
-####                                                             ####
+# Hindcasts and forecasts of response expectations
+# (with truth overlain)
+fc <- forecast(object = mod, type = 'expected')
+plot(fc); points(detect_prob * true_abund, pch = 16, cex = 0.8)
 
-# loo should also work, though need to do some testing to ensure
-# it is stable
-loo(mod)
+# Plot conditional effects
+library(ggplot2)
 
-# This can be a bit confusing, as the detection probability effects
-# are difficult to visualise; it will be better if we can use specific
-# types in marginaleffects functions (type = 'detection' and type = 'latent_N')
-conditional_effects(mod, type = 'link')
-mcmc_plot(mod, variable = 'ar1', regex = TRUE, type = 'hist')
+# Effects on true abundance can be visualised using type = 'link'
+abund_plots <- plot(conditional_effects(mod,
+                    type = 'link',
+                    effects = c('temperature', 'time')),
+                    plot = FALSE)
 
-# Need to allow different types in marginaleffects
-plot_predictions(mod, condition = list('rainfall',
-                                       cap = 30),
-                 type = 'detection')
+# Effect of temperature on abundance
+abund_plots[[1]] +
+  ylab('Latent abundance')
+myplot(true_abund ~ temperature)
 
-# Easy enough to plot some detection probability predictions
-newdata <- data.frame(rainfall = runif(100, min(rainfall), max(rainfall)),
-                      cap = 30,
-                      temperature = mean(model_dat$temperature),
-                      series = 'series1',
-                      time = 1)
-preds <- predict(mod, newdata = newdata, type = 'detection')
-plot(preds[1,] ~ newdata$rainfall, pch = 16, col = 'white',
-     ylim = c(0, 1), ylab = 'Pr(detection)',
-     xlab = 'rainfall')
-for(i in 1:100){
-  lines(preds[i,] ~ newdata$rainfall,
-        col = 'grey70')
-}
-lines(y = data.frame(detect_prob, rainfall) %>%
-        dplyr::arrange(rainfall) %>%
-        dplyr::pull(detect_prob),
-      x = data.frame(detect_prob, rainfall) %>%
-        dplyr::arrange(rainfall) %>%
-        dplyr::pull(rainfall), lwd = 3)
+# Long-term trend in abundance
+abund_plots[[2]] +
+  ylab('Latent abundance')
+myplot(trend)
+
+# Effect of rainfall on detection probability
+det_plot <- plot(conditional_effects(mod,
+                    type = 'detection',
+                    effects = 'rainfall'),
+                    plot = FALSE)
+det_plot[[1]] +
+  ylab('Pr(detection)')
+myplot(detect_prob ~ rainfall)
+
+# More targeted plots can use marginaleffects capabilities;
+# Here visualise how response predictions might change
+# if we considered different possible 'cap' limits on latent
+# abundance and different environmental measurements
+plot_predictions(mod, condition = list('temperature',
+                                       cap = c(15, 50),
+                                       rainfall = c(-1.25, 0, 1.25)),
+                 type = 'response',
+                 conf_level = 0.5) +
+  ylab('Observed abundance') +
+  theme_classic()
