@@ -15,7 +15,6 @@ myplot(abund_linpred ~ temperature)
 trend <-  mvgam:::sim_gp(rnorm(3, 0, 0.5),
                         alpha_gp = 5,
                         rho_gp = 14, h = N)
-plot(trend)
 true_abund <- floor(12 + abund_linpred + trend)
 
 # Detection probability changes non-linearly with rainfall, which
@@ -145,3 +144,87 @@ plot_predictions(mod, condition = list('temperature',
                  conf_level = 0.5) +
   ylab('Observed abundance') +
   theme_classic()
+
+
+#### Reproducing Jeff Doser's example: ####
+# https://www.jeffdoser.com/files/spabundance-web/articles/nmixturemodels
+library(mvgam)
+load(url('https://github.com/doserjef/spAbundance/raw/main/data/dataNMixSim.rda'))
+data.one.sp <- dataNMixSim
+data.one.sp$y <- data.one.sp$y[1, , ]
+abund.cov <- dataNMixSim$abund.covs[, 1]
+abund.factor <- as.factor(dataNMixSim$abund.covs[, 2])
+det.cov <- dataNMixSim$det.covs$det.cov.1[,]
+det.cov[is.na(det.cov)] <- rnorm(length(which(is.na(det.cov))))
+det.cov2 <- dataNMixSim$det.covs$det.cov.2
+det.cov2[is.na(det.cov2)] <- rnorm(length(which(is.na(det.cov2))))
+
+mod_data <- do.call(rbind,
+                    lapply(1:NROW(data.one.sp$y), function(x){
+                      data.frame(y = data.one.sp$y[x,],
+                                 abund_cov = abund.cov[x],
+                                 abund_fac = abund.factor[x],
+                                 det_cov = det.cov[x,],
+                                 det_cov2 = det.cov2[x,],
+                                 time = 1:NCOL(data.one.sp$y),
+                                 site = paste0('site', x))
+                    })) %>%
+  dplyr::mutate(series = as.factor(paste0(site, '_', time)),
+                site = factor(site, levels = unique(site))) %>%
+  dplyr::mutate(time = 1,
+                cap = max(data.one.sp$y, na.rm = TRUE) + 8)
+dplyr::glimpse(mod_data)
+head(mod_data)
+levels(mod_data$site)
+
+trend_map <- mod_data %>%
+  dplyr::mutate(trend = as.numeric(site)) %>%
+  dplyr::select(series, trend)
+dplyr::glimpse(trend_map)
+head(trend_map)
+
+mod <- mvgam(
+  # overall effects of covariates on detection probability
+  formula = y ~ det_cov + det_cov2,
+  # overall effects of the covariates on latent abundance
+  trend_formula = ~ abund_cov +
+    s(abund_fac, bs = 're'),
+  # linking multiple observations to each site
+  trend_map = trend_map,
+  family = nmix(),
+  trend_model = 'None',
+  data = mod_data,
+  # standard normal priors on key regression params
+  priors = c(prior(std_normal(), class = 'b'),
+             prior(std_normal(), class = 'Intercept'),
+             prior(std_normal(), class = 'Intercept_trend')),
+  run_model = TRUE,
+  burnin = 400,
+  samples = 300)
+code(mod)
+summary(mod)
+
+# Overall detection probability
+avg_predictions(mod, type = 'detection')
+
+library(ggplot2)
+# Effect of covariates on latent abundance
+abund_plots <- plot(conditional_effects(mod,
+                                        type = 'link',
+                                        effects = c('abund_cov',
+                                                    'abund_fac')),
+                    plot = FALSE)
+abund_plots[[1]] +
+  ylab('Latent abundance')
+abund_plots[[2]] +
+  ylab('Latent abundance')
+
+det_plots <- plot(conditional_effects(mod,
+                                      type = 'detection',
+                                      effects = c('det_cov',
+                                                  'det_cov2')),
+                  plot = FALSE)
+det_plots[[1]] +
+  ylab('Pr(detection)')
+det_plots[[2]] +
+  ylab('Pr(detection)')
