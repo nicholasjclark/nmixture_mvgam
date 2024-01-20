@@ -146,55 +146,63 @@ plot_predictions(mod, condition = list('temperature',
   theme_classic()
 
 #### A simulation with multiple replicates at each timepoint ####
-# 4 timepoints, 3 reps per timepoint, 2 species with different
+# 1 site, 5 timepoints, 10 reps per timepoint, 2 species with different
 # temporal trends and detection probabilities
 library(dplyr)
 set.seed(123)
 data.frame(site = 1,
            trend = 1,
-           replicate = rep(1:3, 4),
-           time = sort(rep(1:4, 3)),
+           replicate = rep(1:6, 6),
+           time = sort(rep(1:6, 6)),
            species = 'sp_1',
-           truth = c(rep(28, 3),
-                     rep(26, 3),
-                     rep(23, 3),
-                     rep(19, 3)),
-           obs = c(rbinom(3, 28, 0.5),
-                   rbinom(3, 26, 0.5),
-                   rbinom(3, 23, 0.5),
-                   rbinom(3, 19, 0.5))) %>%
+           truth = c(rep(28, 6),
+                     rep(26, 6),
+                     rep(23, 6),
+                     rep(16, 6),
+                     rep(14, 6),
+                     rep(14, 6)),
+           obs = c(rbinom(6, 28, 0.7),
+                   rbinom(6, 26, 0.7),
+                   rbinom(6, 23, 0.7),
+                   rbinom(6, 15, 0.7),
+                   rbinom(6, 14, 0.7),
+                   rbinom(6, 14, 0.7))) %>%
   dplyr::mutate(series = paste0('site_', site,
                                 '_', species,
                                 '_rep_', replicate),
                 time = as.numeric(time),
-                cap = 35) %>%
+                cap = 50) %>%
   dplyr::select(- replicate) -> testdat
 
 # Add another species
 testdat = testdat %>%
   dplyr::bind_rows(data.frame(site = 1,
                               trend = 2,
-                              replicate = rep(1:3, 4),
-                              time = sort(rep(1:4, 3)),
+                              replicate = rep(1:4, 6),
+                              time = sort(rep(1:6, 4)),
                               species = 'sp_2',
-                              truth = c(rep(4, 3),
-                                        rep(7, 3),
-                                        rep(15, 3),
-                                        rep(8, 3)),
-                              obs = c(rbinom(3, 4, 0.8),
-                                      rbinom(3, 7, 0.8),
-                                      rbinom(3, 15, 0.8),
-                                      rbinom(3, 8, 0.8))) %>%
+                              truth = c(rep(4, 4),
+                                        rep(7, 4),
+                                        rep(15, 4),
+                                        rep(16, 4),
+                                        rep(19, 4),
+                                        rep(18, 4)),
+                              obs = c(rbinom(4, 4, 0.45),
+                                      rbinom(4, 7, 0.45),
+                                      rbinom(4, 15, 0.45),
+                                      rbinom(4, 16, 0.45),
+                                      rbinom(4, 19, 0.45),
+                                      rbinom(4, 18, 0.45))) %>%
                      dplyr::mutate(series = paste0('site_', site,
                                                    '_', species,
                                                    '_rep_', replicate),
                                    time = as.numeric(time),
-                                   cap = 18) %>%
+                                   cap = 30) %>%
                      dplyr::select(- replicate))
 
 # Factors for species and series IDs
 testdat$species <- as.factor(testdat$species)
-testdat$series <- factor(testdat$series, 
+testdat$series <- factor(testdat$series,
                          levels = unique(testdat$series))
 
 # The trend_map operates by species here
@@ -213,9 +221,10 @@ mod <- mvgam(obs ~ species,
              family = nmix(),
              data = testdat,
              priors = c(prior(std_normal(), class = b),
-                        prior(std_normal(), class = Intercept),
                         prior(normal(1, 1.5), class = Intercept_trend)),
-             return_model_data = TRUE)
+             return_model_data = TRUE,
+             run_model = TRUE,
+             algorithm = 'sampling')
 
 # Summary and other diagnostics work fine
 summary(mod)
@@ -229,43 +238,67 @@ plot_predictions(mod, condition = list('species',
                                        cap = 10),
                  type = 'detection') +
   ylab('Pr(detection)') +
+  ylim(c(0, 1)) +
   theme_classic() +
   theme(legend.position = 'none')
 
 # Latent N predictions per species (ignoring the observations)
-plot_predictions(mod, 
-                 condition = list(time = 1:4, 
+plot_predictions(mod,
+                 condition = list(time = 1:6,
                                   species = 'sp_1',
-                                  cap = 35),
+                                  cap = 50),
                  type = 'latent_N')
 
-plot_predictions(mod, 
-                 condition = list(time = 1:4, 
+plot_predictions(mod,
+                 condition = list(time = 1:6,
                                   species = 'sp_2',
-                                  cap = 18),
+                                  cap = 30),
                  type = 'latent_N')
 
 # Predictions conditional on the observations
+#### NOTE, THESE ARE WRONG BECAUSE OF THE YTIMES ORDERING!!!! ####
 ypreds <- mvgam:::mcmc_chains(mod$model_output, 'latent_ypred')
 dim(ypreds)
+dimnames(ypreds)
+
+ypreds <- predict(mod, newdata = testdat %>%
+                    dplyr::arrange(time, series),
+                  type = 'latent_N')
+dim(ypreds)
+
+which_sp <- 1
+truthdat <- testdat %>%
+  dplyr::arrange(time, series) %>%
+  dplyr::mutate(id = dplyr::row_number()) %>%
+  dplyr::filter(trend == !!which_sp) %>%
+  dplyr::mutate(series = droplevels(series))
+
+ids = truthdat %>%
+  dplyr::pull(id)
+
+truths <- truthdat %>%
+  dplyr::select(time, truth) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(time)
+tot_replicates <- length(unique(truthdat$series))
 
 # Pull out the time series of each replicate and plot
 plot(1,
      type = 'n',
-     xlim = c(1, 4),
-     ylim = range(ypreds[,which(testdat$trend == 1)]))
-for(i in 1:3){
+     xlim = c(1, NROW(truths)),
+     ylim = c(0, max(ypreds[,ids])))
+for(i in 1:tot_replicates){
   for(j in 1:300){
-    points(x = jitter(1:4, 0.2),
-           ypreds[j,which(as.numeric(testdat$series) == i)],
+    points(x = jitter(1:6, 0.2),
+           ypreds[j,ids[which(as.numeric(truthdat$series) == i)]],
            col = "#BEBEBE4C", pch = 16, cex = 0.7)
   }
 }
-points(x = 1:4,
-       y = c(28, 26, 23, 19),
+points(x = 1:NROW(truths),
+       y = truths$truth,
        pch = 16, cex = 1.1, col = 'white')
-points(x = 1:4,
-       y = c(28, 26, 23, 19),
+points(x = 1:NROW(truths),
+       y = truths$truth,
        pch = 16, cex = 0.9,col = 'darkred')
 
 
