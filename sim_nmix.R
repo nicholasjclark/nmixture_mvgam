@@ -1,47 +1,53 @@
 # Function to plot latent abundance estimates vs truth
-plot_latentN = function(model_df, trend_map,
-                        model, trend = 1){
-  ypreds <- mvgam:::mcmc_chains(model$model_output, 'latent_ypred')
-  ypreds <- predict(model, newdata = model_df %>%
-                      dplyr::arrange(time, series),
-                    type = 'latent_N')
+plot_latentN = function(hindcasts, data, species = 'sp_1',
+                        site = 'site_1'){
+  all_series <- unique(data %>%
+                         dplyr::filter(species == !!species,
+                                       site == !!site) %>%
+                         dplyr::pull(series))
   
-  truthdat <- model_df %>%
-    dplyr::left_join(trend_map) %>%
+  # Grab the first replicate that represents this series
+  # so we can get the true simulated values
+  series <- as.numeric(all_series[1])
+  truths <- data %>%
     dplyr::arrange(time, series) %>%
-    dplyr::mutate(id = dplyr::row_number()) %>%
-    dplyr::filter(trend == !!trend) %>%
-    dplyr::mutate(series = droplevels(series))
+    dplyr::filter(series == !!levels(data$series)[series]) %>%
+    dplyr::pull(true_count)
   
-  ids = truthdat %>%
-    dplyr::pull(id)
+  # In case some replicates have missing observations,
+  # pull out predictions for ALL replicates and average over them
+  hcs <- do.call(rbind, lapply(all_series, function(x){
+    ind <- which(names(hindcasts$hindcasts) %in% as.character(x))
+    hindcasts$hindcasts[[ind]]
+  }))
   
-  truths <- truthdat %>%
-    dplyr::select(time, true_count) %>%
-    dplyr::distinct() %>%
-    dplyr::arrange(time)
-  tot_replicates <- length(unique(truthdat$series))
+  # Calculate posterior empirical quantiles of predictions
+  pred_quantiles <- data.frame(t(apply(hcs, 2, function(x) 
+    quantile(x, probs = c(0.05, 0.2, 0.3, 0.4, 
+                          0.5, 0.6, 0.7, 0.8, 0.95)))))
+  pred_quantiles$time <- 1:NROW(pred_quantiles)
+  pred_quantiles$truth <- truths
   
-  # Pull out the time series of each replicate and plot
-  plot(1,
-       type = 'n',
-       xlim = c(1, NROW(truths)),
-       ylim = c(0, max(c(max(truths$true_count),
-                         max(ypreds[,ids])))))
-  for(i in 1:tot_replicates){
-    for(j in 1:300){
-      points(x = jitter(1:6, 0.2),
-             ypreds[j,ids[which(as.numeric(truthdat$series) == i)]],
-             col = "#BEBEBE4C", pch = 16, cex = 0.7)
-    }
-  }
-  points(x = 1:NROW(truths),
-         y = truths$true_count,
-         pch = 16, cex = 1.1, col = 'white')
-  points(x = 1:NROW(truths),
-         y = truths$true_count,
-         pch = 16, cex = 0.9,col = 'darkred')
-  
+  # Grab observations
+  data %>%
+    dplyr::filter(series %in% all_series) %>%
+    dplyr::select(time, obs_count) -> observations
+  ggplot(pred_quantiles, aes(x = time, group = 1)) +
+    geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "#DCBCBC") + 
+    geom_ribbon(aes(ymin = X20., ymax = X80.), fill = "#C79999") +
+    geom_ribbon(aes(ymin = X30., ymax = X70.), fill = "#B97C7C") +
+    geom_ribbon(aes(ymin = X40., ymax = X60.), fill = "#A25050") +
+    geom_line(aes(x = time, y = truth),
+               colour = 'black', size = 1) +
+    geom_point(aes(x = time, y = truth),
+               shape = 21, colour = 'white', fill = 'black',
+               size = 2.5) +
+    geom_jitter(data = observations, aes(x = time, y = obs_count),
+               width = 0.06, 
+               shape = 21, fill = 'darkred', colour = 'white', size = 2.5) +
+    labs(y = 'Latent abundance (N)',
+         x = 'Time',
+         title = paste0(species, '; ', site))
 }
 
 # Function to construct species' nonlinear responses to
@@ -205,10 +211,12 @@ simulate_nmix = function(n_sites = 5,
   }
 
   # Simulate species base abundances hierarchically
-  sp_N_alphas <- floor(extraDistr::rtnorm(n_species, 
+  sp_N_alphas <- matrix(floor(extraDistr::rtnorm(n_species*n_sites, 
                                           base_lambda, 
-                                          0.5,
-                                          a = 5, b = 100))
+                                          base_lambda / 5,
+                                          a = 5, b = 100)),
+                        ncol = n_species,
+                        nrow = n_sites)
   
   # All species respond nonlinearly to long-term temperature change
   sp_temp_1s <- runif(n_species, 10, 18)
@@ -218,21 +226,23 @@ simulate_nmix = function(n_sites = 5,
   
   # Latent abundances at each site and timepoint are made up of
   # nonlinear responses to the moving average temperature variable as 
-  # well as a random walk trend component
-  scale2 = function(x){
-    scales::rescale(x, to = c(-2, 2))
+  # site*species level intercepts and a random walk trend component
+  scale2 = function(x, base_lambda){
+    
+    scales::rescale(x, to = c(-(base_lambda / 10), 
+                              (base_lambda / 10)))
   }
   
   sp_abundances <- array(NA , dim = c(n_sites, n_species, N))
   for(i in 1:n_sites){
     for(j in 1:n_species){
       sp_abundances[i, j, ] <- pmax(0, 
-                                    floor(sp_N_alphas[j] +
+                                    floor(sp_N_alphas[i, j] +
                                             temperature_function(sp_temp_1s[j],
                                                                  sp_temp_2s[j],
                                                                  sp_temp_3s[j],
                                                                  temperature[i, ]) +
-                                            scale2(cumsum(rnorm(N)))))
+                                            scale2(cumsum(rnorm(N)), base_lambda)))
     }
   }
 

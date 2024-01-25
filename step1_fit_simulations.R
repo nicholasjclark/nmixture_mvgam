@@ -30,27 +30,29 @@ options(ggplot2.discrete.colour = c("#A25050",
 source('sim_nmix.R')
 
 # Simulate with: 
-# 6 years
-# 10 sites
-# 2 species
+# 10 years (timepoints)
+# 8 sample sites
+# 2 species with correlated environmental responses
 # 3 replicates per year
-# base detection probability = 0.6
+# base detection probability = 0.3
 # base mean latent abundance = 30
-# 10% of observations missing
-set.seed(1)
-simdat <- simulate_nmix(n_sites = 10,
-                        n_timepoints = 6,
+# 8% of observations missing
+set.seed(7)
+simdat <- simulate_nmix(n_sites = 8,
+                        n_timepoints = 10,
                         n_species = 2,
                         n_replicates = 3,
-                        prop_missing = 0.1,
+                        prop_missing = 0.08,
+                        base_detprob = 0.3,
                         base_lambda = 30)
+
+# The simulated temperature effects on latent abundance
 plot_tempfuncs(simdat, 1)
 plot_tempfuncs(simdat, 2)
-simdat$abund_params
 
+# The simulated rainfall effects on detection probability
 plot_rainfuncs(simdat, 1)
 plot_rainfuncs(simdat, 2)
-simdat$detection_params
 
 # Inspect the returned modeling data.frame
 model_df <- simdat$model_df
@@ -129,30 +131,32 @@ plot_predictions(mod_rain, condition = c('rainfall',
 
 # Try a model
 mod <- mvgam(formula = obs_count ~
-               # rainfall can impact detection for each 
-               # species in nonlinear ways
-               species + 
-               s(rainfall, by = species, k = 6) - 1,
+               # each species' detection prob can have a different nonlinear 
+               # association with rainfall
+               s(rainfall, k = 4) +
+               s(rainfall, species, bs = 'sz', k = 4) - 1,
              
              trend_formula = ~ 
+               # Each site*species combination can have a different
+               # average abundance
+               trend +
                
                # each species' abundance can have a different nonlinear 
                # association with temperature
-               species + 
-               s(temperature, by = species, k = 6) + 
-               s(time, by = trend, k = 4),
+               s(temperature, k = 4) +
+               s(temperature, species, bs = 'sz', k = 4),
              trend_map = trend_map,
+             trend_model = RW(),
              family = nmix(),
              data = model_df,
-             priors = c(prior(std_normal(), class = b),
+             priors = c(prior(exponential(10), class = sigma),
                         prior(normal(2, 2), class = Intercept_trend)),
              return_model_data = TRUE,
+             run_model = TRUE,
              algorithm = 'meanfield',
-             samples = 500)
+             samples = 1000)
 
 summary(mod, include_betas = FALSE)
-plot(mod, type = 'smooths')
-plot(mod, type = 'smooths', trend_effects = TRUE)
 
 # Modeled nonlinear functions vs the true simulated functions
 plot_predictions(mod, condition = c('temperature',
@@ -187,25 +191,28 @@ plot_predictions(mod_rain, condition = c('rainfall',
   ylim(c(0, 1)) +
   theme(legend.position = 'none')
 
+# Plot some of the latent N predictions vs truths
+hc <- hindcast(mod, type = 'latent_N')
 
-plot_latentN(model_df,
-             trend_map,
-             mod,
-             trend = 1)
-plot_latentN(model_df,
-             trend_map,
-             mod,
-             trend = 2)
-plot_latentN(model_df,
-             trend_map,
-             mod,
-             trend = 3)
-plot_latentN(model_df,
-             trend_map,
-             mod,
-             trend = 7)
-plot_latentN(model_df,
-             trend_map,
-             mod,
-             trend = 8)
+plot_latentN(hc, model_df, 
+             species = 'sp_1',
+             site = 'site_1')
+plot_latentN(hc, model_df, 
+             species = 'sp_1',
+             site = 'site_2')
+plot_latentN(hc, model_df, 
+             species = 'sp_1',
+             site = 'site_3')
+plot_latentN(hc, model_df, 
+             species = 'sp_1',
+             site = 'site_4')
 
+plot_latentN(hc, model_df, 
+             species = 'sp_2',
+             site = 'site_1')
+plot_latentN(hc, model_df, 
+             species = 'sp_2',
+             site = 'site_2')
+plot_latentN(hc, model_df, 
+             species = 'sp_2',
+             site = 'site_3')
