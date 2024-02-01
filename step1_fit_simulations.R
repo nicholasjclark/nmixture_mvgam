@@ -155,7 +155,7 @@ mod <- mvgam(formula = obs_count ~
              run_model = TRUE,
              algorithm = 'meanfield',
              samples = 1000)
-
+code(mod)
 summary(mod, include_betas = FALSE)
 
 # Modeled nonlinear functions vs the true simulated functions
