@@ -1,3 +1,34 @@
+# A custom ggplot2 theme
+theme_set(theme_classic(base_size = 12, base_family = 'serif') +
+            theme(axis.line.x.bottom = element_line(colour = "black",
+                                                    size = 1),
+                  axis.line.y.left = element_line(colour = "black",
+                                                  size = 1)))
+options(ggplot2.discrete.colour = c("#A25050",
+                                    "#00008b",
+                                    'darkred',
+                                    "#010048"),
+        ggplot2.discrete.fill = c("#A25050",
+                                  "#00008b",
+                                  'darkred',
+                                  "#010048"))
+
+# Function to plot observed counts vs truth
+plot_counts = function(simdat){
+  ggplot(rbind(simdat$model_df %>%
+                 dplyr::mutate(count = obs_count,
+                               type = 'Observed'),
+               simdat$model_df %>%
+                 dplyr::mutate(count = true_count,
+                               type = 'Truth')), 
+         aes(x = as.numeric(count),
+             fill = type)) +
+    geom_histogram(col = 'white') + labs(x = 'Population count',
+                                         y = 'Frequency') +
+    facet_wrap(~type, nrow = 2,
+               scales = 'free_y') + theme(legend.position = 'none')
+}
+
 # Function to plot latent abundance estimates vs truth
 plot_latentN = function(hindcasts, data, species = 'sp_1',
                         site = 'site_1'){
@@ -53,26 +84,30 @@ plot_latentN = function(hindcasts, data, species = 'sp_1',
 # Function to construct species' nonlinear responses to
 # temperature (which must be scaled to [0,1])
 temperature_function = function(a, b, c, temperature){
-  (exp(a * temperature +
-         b * a * temperature ^ 2 +
-         a / 4 * temperature ^ 4) - 
-     a / 1.5) * c
+  temperature = temperature - 0.5
+  c + (a * temperature +
+     b * temperature ^ 2)
 }
 
-plot_tempfuncs = function(simdat, species = 1){
+plot_tempfuncs = function(simdat){
+  n_species <- length(unique(simdat$model_df$species))
   simtemp <- seq(min(simdat$model_df$temperature), 
                  max(simdat$model_df$temperature), 
                  length.out = 500)
-  y <- temperature_function(simdat$abund_params$temps1[species],
-                            simdat$abund_params$temps2[species],
-                            simdat$abund_params$temps3[species],
-                            simtemp)
-  plot(x = simtemp, y = y,
-       type = 'l', lwd = 2,
-       xlab = 'temperature',
-       ylab = 'F(temperature)',
-       bty = 'l')
-  box(bty = 'l', lwd = 2)
+  sim_funcs <- do.call(rbind, lapply(seq_len(n_species), function(species){
+    data.frame(temp = simtemp,
+               y = temperature_function(simdat$abund_params$temps1[species],
+                                        simdat$abund_params$temps2[species],
+                                        simdat$abund_params$temps3[species],
+                                        simtemp),
+               species = paste0('species_', species))
+  }))
+
+  ggplot(sim_funcs, aes(x = temp,
+                        y = y,
+                        col = species)) + 
+    geom_line(size = 1) + 
+    labs(x = 'Temperature (normalized)', y = 'F(temperature) on latent N')
 }
 
 # Function to construct nonlinear responses of 
@@ -83,21 +118,27 @@ rainfall_function = function(a, b, c, d, rainfall){
            (d * rainfall ^ 3))
 }
 
-plot_rainfuncs = function(simdat, species = 1){
+plot_rainfuncs = function(simdat){
+  n_species <- length(unique(simdat$model_df$species))
   simrain <- seq(min(simdat$model_df$rainfall), 
                  max(simdat$model_df$rainfall), 
                  length.out = 500)
-  y <- rainfall_function(simdat$detection_params$alphas[species],
-                         simdat$detection_params$linrainfalls[species],
-                         simdat$detection_params$quadrainfalls[species],
-                         simdat$detection_params$cubrainfalls[species],
-                         simrain)
-  plot(x = simrain, y = y,
-       type = 'l', lwd = 2,
-       xlab = 'rainfall',
-       ylab = 'F(rainfall)',
-       bty = 'l', ylim = c(0, 1))
-  box(bty = 'l', lwd = 2)
+  sim_funcs <- do.call(rbind, lapply(seq_len(n_species), function(species){
+    data.frame(rainfall = simrain,
+               y = rainfall_function(simdat$detection_params$alphas[species],
+                                     simdat$detection_params$linrainfalls[species],
+                                     simdat$detection_params$quadrainfalls[species],
+                                     simdat$detection_params$cubrainfalls[species],
+                                     simrain),
+               species = paste0('species_', species))
+  }))
+  
+  ggplot(sim_funcs, aes(x = rainfall,
+                        y = y,
+                        col = species)) + 
+    geom_line(size = 1) + 
+    ylim(c(0, 1)) +
+    labs(x = 'Rainfall (z-scored)', y = 'Pr(detection)')
 }
 
 # Function to simulate from a squared exponential Gaussian Process
@@ -144,8 +185,8 @@ simulate_nmix = function(n_sites = 5,
   if(base_lambda < 10L){
     stop('Not recommended to use base abundance < 10')
   }
-  if(base_detprob < 0.2){
-    stop('Not recommended to use base detection probability < 0.2')
+  if(base_detprob < 0.1){
+    stop('Not recommended to use base detection probability < 0.1')
   }
   
   # Required libraries (besides mvgam and spAbundance)
@@ -163,24 +204,20 @@ simulate_nmix = function(n_sites = 5,
   for(i in 1:n_sites){
     trend <- mvgam:::sim_ar3(ar1 = 0.9,
                              h = N, 
-                             tau = 10)
+                             tau = 5)
     
     rainfall[i, ] <- as.vector(scale(sin(2 * pi * (1:N) / 365) +
       runif(1, 0.8, 1.1) * cos(2 * pi * (1:N) / 365) + 
       trend)) 
   }
 
-  # Species' base detection probabilities hierarchically
-  sp_det_alphas <- extraDistr::rtnorm(n_species, 
-                                      qlogis(base_detprob), 
-                                      0.1, 
-                                      a = 0.3, 
-                                      b = 0.85)
+  # Species' base detection probabilities
+  sp_det_alphas <- rep(qlogis(base_detprob), n_species)
   
   # All species will become more detectable as rainfall
   # reaches a 'happy medium'
-  sp_rain_1s <- runif(n_species, 0.75, 1.4)
-  sp_rain_2s <- runif(n_species, -0.55, -0.10)
+  sp_rain_1s <- runif(n_species, 0.5, 1.1)
+  sp_rain_2s <- runif(n_species, -0.55, -0.15)
   sp_rain_3s <- runif(n_species, -0.35, -0.10) 
   
   # Detection probabilities at each site and timepoint
@@ -195,57 +232,6 @@ simulate_nmix = function(n_sites = 5,
     }
   }
 
-  # Simulate a long-term moving average temperature pattern at each
-  # site that revolves around a primary long-term trend
-  set.seed(111)
-  main_temp <- sim_gp(N = N, alpha = 1, rho = N / 3)
-  temperature <- matrix(NA, 
-                     nrow = n_sites,
-                     ncol = N)
-  for(i in 1:n_sites){
-    trend <- main_temp + 0.15 * 
-      scale(cumsum(rnorm(N)))
-    
-    temperature[i, ] <- (trend - min(trend)) /
-      (max(trend) - min(trend))
-  }
-
-  # Simulate species base abundances hierarchically
-  sp_N_alphas <- matrix(floor(extraDistr::rtnorm(n_species*n_sites, 
-                                          base_lambda, 
-                                          base_lambda / 5,
-                                          a = 5, b = 100)),
-                        ncol = n_species,
-                        nrow = n_sites)
-  
-  # All species respond nonlinearly to long-term temperature change
-  sp_temp_1s <- runif(n_species, 10, 18)
-  sp_temp_2s <- scales::rescale(rnorm(n_species),
-                                to = c(-1.4, -1.1))
-  sp_temp_3s <- sample(c(-1, 1), n_species, replace = TRUE)
-  
-  # Latent abundances at each site and timepoint are made up of
-  # nonlinear responses to the moving average temperature variable as 
-  # site*species level intercepts and a random walk trend component
-  scale2 = function(x, base_lambda){
-    
-    scales::rescale(x, to = c(-(base_lambda / 10), 
-                              (base_lambda / 10)))
-  }
-  
-  sp_abundances <- array(NA , dim = c(n_sites, n_species, N))
-  for(i in 1:n_sites){
-    for(j in 1:n_species){
-      sp_abundances[i, j, ] <- pmax(0, 
-                                    floor(sp_N_alphas[i, j] +
-                                            temperature_function(sp_temp_1s[j],
-                                                                 sp_temp_2s[j],
-                                                                 sp_temp_3s[j],
-                                                                 temperature[i, ]) +
-                                            scale2(cumsum(rnorm(N)), base_lambda)))
-    }
-  }
-
   # Now simulate the replicate samples, spanning the 'breeding' season
   # each year (roughly between May and July)
   sample_times <- array(NA, dim = c(n_timepoints, n_replicates))
@@ -254,13 +240,84 @@ simulate_nmix = function(n_sites = 5,
                                 n_replicates,
                                 replace = FALSE) + 365 * (t - 1)
   }
+  
+  # Simulate species base abundances hierarchically
+  sp_N_alphas <- matrix(floor(extraDistr::rtnorm(n_species*n_sites, 
+                                          base_lambda, 
+                                          base_lambda / 10,
+                                          a = base_lambda / 2, 
+                                          b = base_lambda * 2)),
+                        ncol = n_species,
+                        nrow = n_sites)
+  
+  # Simulate moving average temperatures per site, which revolve
+  # around a central 'global' temperature trend
+  main_temp <- sim_gp(N = n_timepoints, alpha = 1, 
+                      rho = n_timepoints / 3)
+  
+  closed_temp = function(main_temp, n_timepoints, n_replicates){
+    trend <- main_temp + 0.65 * 
+      scale(cumsum(rnorm(n_timepoints)))
+    trend <- scales::rescale(trend, c(-1.85, 1.85))
+    out <- do.call(cbind, lapply(seq_len(n_replicates), function(x){ 
+      trend
+    }))
+    return(out)
+  }
+  
+  temp_observations <- array(NA , dim = c(n_sites, n_timepoints, n_replicates))
+  for(i in 1:n_sites){
+    temp_observations[i, , ] <- closed_temp(main_temp,
+                                            n_timepoints,
+                                            n_replicates)
+  }
+  
+  # All species respond linearly to long-term temperature change
+  sp_temps <- runif(n_species, 0.15, 0.25) *
+    sample(c(-1, 1), n_species, TRUE)
 
+  # Latent abundances at each site and timepoint are made up of
+  # responses to the moving average temperature variable and
+  # site*species level intercept, plus some year to year autocorrelation
+  closed_abund = function(alpha, temps, sp_temp, 
+                          n_timepoints, n_replicates){
+    
+    # Species abundances evolve as AR1s plus temperature effects
+    ar1 <- runif(1, 0.25, 0.65)
+    linpreds <- log(alpha) + temps * sp_temp
+    errors <- rnorm(n_timepoints, 0, 0.25)
+    trend <- vector(length = n_timepoints)
+    trend[1] <- linpreds[1]
+    for(t in 2:n_timepoints){
+      trend[t] <- ar1 * (errors[t - 1]) +
+        linpreds[t] +
+        errors[t]
+    }
+    trend <- ceiling(exp(trend))
+    out <- do.call(cbind, lapply(seq_len(n_replicates), function(x){ 
+      trend
+    }))
+    return(out)
+  }
+  
+  sp_truths <- array(NA , dim = c(n_sites, n_species, n_timepoints, n_replicates))
+  for(i in 1:n_sites){
+    for(j in 1:n_species){
+      sp_truths[i, j, , ] <- closed_abund(alpha = sp_N_alphas[i, j],
+                                          temps = temp_observations[i, , 1],
+                                          sp_temp = sp_temps[j],
+                                          n_timepoints = n_timepoints,
+                                          n_replicates = n_replicates)
+    }
+  }
+  
+  # Take imperfect observations, which depend on rainfall
   sp_observations <- array(NA , dim = c(n_sites, n_species, n_timepoints, n_replicates))
   for(i in 1:n_sites){
     for(j in 1:n_species){
       for(t in 1:n_timepoints){
         sp_observations[i, j, t, ] <- rbinom(n_replicates, 
-                                             size = floor(mean(sp_abundances[i, j, sample_times[t,]])), 
+                                             size = sp_truths[i, j, t,], 
                                              prob = sp_det_probs[i, j, sample_times[t,]])
       }
     }
@@ -273,15 +330,6 @@ simulate_nmix = function(n_sites = 5,
                           replace = FALSE)
     sp_observations[missing_obs] <- NA
   }
-
-  sp_truths <- array(NA , dim = c(n_sites, n_species, n_timepoints, n_replicates))
-  for(i in 1:n_sites){
-    for(j in 1:n_species){
-      for(t in 1:n_timepoints){
-        sp_truths[i, j, t, ] <- floor(mean(sp_abundances[i, j, sample_times[t,]]))
-      }
-    }
-  }
   
   #### Return necessary objects ####
   # The count observations as a dataframe
@@ -293,12 +341,6 @@ simulate_nmix = function(n_sites = 5,
     dplyr::left_join(truth_df)
   
   # The environmental measurements as dataframes
-  temp_observations <- array(NA , dim = c(n_sites, n_timepoints, n_replicates))
-  for(i in 1:n_sites){
-    for(t in 1:n_timepoints){
-      temp_observations[i, t, ] <- mean(temperature[i, sample_times[t,]])
-    }
-  }
   temp_obs_df <- melt_env_array(temp_observations, 'temperature')
   
   rainfall_observations <- array(NA , dim = c(n_sites, n_timepoints, n_replicates))
@@ -359,10 +401,8 @@ simulate_nmix = function(n_sites = 5,
                                       linrainfalls = sp_rain_1s,
                                       quadrainfalls = sp_rain_2s,
                                       cubrainfalls = sp_rain_3s),
-              abund_params = list(temps1 = sp_temp_1s,
-                                  temps2 = sp_temp_2s,
-                                  temps3 = sp_temp_3s)
-              
+              abund_params = list(alphas = sp_N_alphas,
+                                  temps = sp_temps)
               ))
 }
 
