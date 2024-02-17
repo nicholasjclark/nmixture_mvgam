@@ -1,0 +1,395 @@
+---
+title: "N-mixture simulation outline"
+author: "Nicholas Clark"
+date: "2024-02-13"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{css, echo=FALSE}
+details > summary {
+  padding: 4px;
+  background-color: #8F2727;
+  color: white;
+  border: none;
+  box-shadow: 1px 1px 2px #bbbbbb;
+  cursor: pointer;
+}
+
+details > summary:hover {
+  background-color: #DCBCBC;
+  color: #8F2727;
+}
+
+.scroll-300 {
+  max-height: 300px;
+  overflow-y: auto;
+  background-color: inherit;
+}
+
+h1, #TOC>ul>li {
+  color: #8F2727;
+}
+
+h2, #TOC>ul>ul>li {
+  color: #8F2727;
+}
+
+h3, #TOC>ul>ul>li {
+  color: #8F2727;
+}
+
+.list-group-item.active, .list-group-item.active:focus, .list-group-item.active:hover {
+    z-index: 2;
+    color: #fff;
+    background-color: #DCBCBC;
+    border-color: #DCBCBC;
+}
+
+a {
+    color: purple;
+    font-weight: bold;
+}
+
+a:hover {
+    color: #C79999;
+}
+
+::selection {
+  background: #DCBCBC;
+  color: #8F2727;
+}
+
+.button_red {
+  background-color: #8F2727;
+  border: #8F2727;
+  color: white;
+}
+
+.button_red:hover {
+  background-color: #DCBCBC;
+  color: #8F2727;
+}
+```
+
+```{r klippy, echo=FALSE, include=TRUE, message = FALSE, warning = FALSE}
+if(!requireNamespace('klippy')){
+  remotes::install_github("rlesur/klippy")
+}
+klippy::klippy(position = c('top', 'right'), color = 'darkred')
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,   
+  dpi = 150,
+  fig.asp = 0.8,
+  fig.width = 6,
+  out.width = "60%",
+  fig.align = "center",
+  class.source='klippy')
+```
+
+## Simulate data
+Required libraries for these simulations include:  
+`insight`  
+`tidyr`  
+`reshape2`  
+`mvnfast`  
+`scales`  
+`extraDistr`  
+`mvgam`  
+`scoringRules`  
+`ggplot2`
+
+```{r include = FALSE}
+library(mvgam)
+library(ggplot2)
+library(dplyr)
+```
+
+```{r eval = FALSE}
+library(mvgam)
+library(ggplot2)
+library(dplyr)
+```
+
+Source the simulation functions
+```{r}
+source('sim_nmix.R')
+```
+
+Now simulate some N-mixture observations. The primary function `simulate_nmix()` will simulate a smooth, long-term moving average temperature trend for each site, as well as seasonally-variable rainfall for each day over the study period. Each species' latent abundance is composed of linear dependence on the temperature variable and an autoregressive temporal process, while detection probabilities are allowed to depend nonlinearly on rainfall. Replicate observations are taken within a closure period to ensure good representation of rainfall conditions. We can control the dimensionality of the data as well as base detection and abundance values, and the proportion of missing observations. This particular simulation example will use the following parameters:  
+   
+-10 years (i.e. timepoints)   
+-8 sample sites   
+-2 species with possibly correlated environmental responses   
+-3 replicates per year   
+-base detection probability = 0.3   
+-base mean latent abundance = 50   
+-5% of observations missing   
+```{r}
+set.seed(99)
+simdat <- simulate_nmix(n_sites = 8,
+                        n_timepoints = 10,
+                        n_species = 2,
+                        n_replicates = 3,
+                        prop_missing = 0.05,
+                        base_detprob = 0.3,
+                        base_lambda = 50)
+```
+
+Inspect the returned modeling `data.frame`
+```{r}
+model_df <- simdat$model_df
+dplyr::glimpse(model_df)
+length(which(is.na(model_df$obs_count)))
+NROW(model_df)
+```
+
+Inspect the `trend_map` `data.frame`, which controls how the replicates are linked to the underlying process models
+```{r}
+trend_map <- simdat$trend_map
+dplyr::glimpse(trend_map)
+```
+
+The number of unique species * site combinations, which form the basis of the latent (possibly dynamic) factors
+```{r}
+length(unique(trend_map$trend))
+```
+
+Add a `cap` variable to the data.frame to be used for setting the upper limit for marginalising over the latent abundance states; this needs to be large enough so that we can get a reasonable idea of support for different detection / latent abundance combinations
+```{r}
+model_df %>%
+  dplyr::group_by(species, site) %>%
+  dplyr::mutate(max_obs = max(obs_count, na.rm = TRUE)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(cap = max(150, 
+                          as.integer(floor(max_obs * 2.5)))) -> model_df
+```
+
+## Visualize the data
+Inspect the observed and true count distributions
+```{r}
+plot_counts(simdat)
+```
+
+Look at the simulated rainfall effects on detection probability
+```{r}
+plot_rainfuncs(simdat)
+```
+
+A quick plot to show the replicate observations over time for some of the sites, with the 'true' counts also shown in black. Shown in grey is the `cap` for each site*species combination (these do not have to be the same)
+```{r}
+ggplot(model_df %>%
+         dplyr::filter(site %in% c('site_1', 'site_2',
+                                   'site_3', 'site_4',
+                                   'site_5')), 
+       aes(x = time, y = true_count, fill = species)) +
+  geom_line(colour = 'black', size = 1) +
+  geom_point(shape = 21, colour = 'white', fill = 'black',
+             size = 2.5) +
+  geom_line(aes(x = time, y = cap), colour = 'gray',
+            size = 1) +
+  geom_jitter(aes(x = time, y = obs_count),
+              width = 0.08,
+              shape = 21, colour = 'white', size = 2.5) +
+  facet_grid(rows = vars(species),
+             cols = vars(site), 
+             scales = 'free') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  labs(y = 'Count', x = 'Year')
+```
+
+## Model with `mvgam()`
+Fit a model that showcases `mvgam`'s flexibility. Here we use GAMs for the detection and latent abundance associations with the environmental predictors. The temperature effects were simulated to be linear but we use splines here anyway to see how well the model is able to regularize those towards non-wiggly functions. We also use hierarchical intercepts for latent abundance, using the non-centred parameterization by default. Finally, we capture unmodelled temporal autocorrelation using process-specific autoregressive errors
+```{r include = FALSE, cache = TRUE}
+mod <- mvgam(formula = obs_count ~
+               # Each species' detection prob can have a different nonlinear 
+               # association with rainfall; use the 'by' version here to force
+               # each smooth to be zero-centred (i.e. centred about the detection
+               # intercept); this allows us to use prior knowledge so we can
+               # place a more informative prior on the detection prob intercept
+               s(rainfall, by = species, k = 4),
+             
+             trend_formula = ~ 
+               # Hierarchical intercepts for each species*site combination
+               s(trend, bs = 're') +
+               
+               # Effects of temperature for each species are modelled in the
+               # same way
+               # (could use s(temperature, by = species, bs = 're') for 
+               # hierarchical linear slopes if we wanted)
+               s(temperature, by = species, k = 4),
+             
+             # Independent dynamic processes for each species*site
+             # combination to capture unmodelled autocorrelation
+             trend_model = AR(),
+             
+             # Regularize key model parameters using informative priors
+             priors = c(
+               # Prior knowledge on base detection probability plays a huge role
+               # in getting sensible estimates of latent N; here we assume detection
+               # is low on average, but use a T distribution for heavier tails
+               prior(student_t(4, -1.5, 0.25), class = Intercept),
+               
+               # A strong prior on smoothing penalties helps to reduce any overfitting
+               prior(normal(20, 10), class = lambda),
+               prior(normal(20, 10), class = lambda_trend),
+               
+               # Reasonable prior on the base latent abundance
+               prior(normal(4, 2.5), class = Intercept_trend),
+               
+               # Regularizing prior on the population variance for hierarchical intercepts
+               prior(exponential(2), class = sigma_raw_trend),
+               
+               # Regularizing prior on the variances of the AR1 processes
+               prior(exponential(10), class = sigma)),
+             trend_map = trend_map,
+             family = nmix(),
+             algorithm = 'meanfield',
+             samples = 1000,
+             data = model_df)
+```
+
+```{r eval = FALSE}
+mod <- mvgam(formula = obs_count ~
+               # Each species' detection prob can have a different nonlinear 
+               # association with rainfall; use the 'by' version here to force
+               # each smooth to be zero-centred (i.e. centred about the detection
+               # intercept); this allows us to use prior knowledge so we can
+               # place a more informative prior on the detection prob intercept
+               s(rainfall, by = species, k = 4),
+             
+             trend_formula = ~ 
+               # Hierarchical intercepts for each species*site combination
+               s(trend, bs = 're') +
+               
+               # Effects of temperature for each species are modelled in the
+               # same way
+               # (could use s(species, by = temperature bs = 're') for 
+               # hierarchical linear slopes if we wanted)
+               s(temperature, by = species, k = 4),
+             
+             # Independent dynamic processes for each species*site
+             # combination to capture unmodelled autocorrelation
+             trend_model = AR(),
+             
+             # Regularize key model parameters using informative priors
+             priors = c(
+               # Prior knowledge on base detection probability plays a huge role
+               # in getting sensible estimates of latent N; here we assume detection
+               # is low on average, but use a T distribution for heavier tails
+               prior(student_t(4, -1.5, 0.25), class = Intercept),
+               
+               # A strong prior on smoothing penalties helps to reduce any overfitting
+               prior(normal(20, 10), class = lambda),
+               prior(normal(20, 10), class = lambda_trend),
+               
+               # Reasonable prior on the base latent abundance
+               prior(normal(4, 2.5), class = Intercept_trend),
+               
+               # Regularizing prior on the population variance for hierarchical intercepts
+               prior(exponential(2), class = sigma_raw_trend),
+               
+               # Regularizing prior on the variances of the AR1 processes
+               prior(exponential(10), class = sigma)),
+             trend_map = trend_map,
+             algorithm = 'meanfield',
+             samples = 1000,
+             data = model_df)
+```
+
+## Model diagnostics
+View key parameter summaries, but don't bother looking at each individual spline coefficient
+```{r}
+summary(mod, include_betas = FALSE)
+```
+
+We can also use the standard coefficient plots, here for the AR1 parameters for example
+```{r}
+mcmc_plot(mod, variable = 'ar1', regex = TRUE)
+```
+
+## Inferences
+Plot the modeled covariate functions vs the true simulated effects
+```{r}
+plot_predictions(mod, condition = c('temperature',
+                                    'species'),
+                 type = 'link') +
+  ylab('Expected abundance')
+simdat$abund_params$temps
+```
+
+```{r}
+plot_predictions(mod, condition = c('rainfall',
+                                    'species'),
+                 type = 'detection') +
+  ylab('Pr(detection)') +
+  ylim(c(0, 1))
+plot_rainfuncs(simdat)
+```
+
+
+## Latent abundance predictions
+Calculate latent N predictions for each site*species combination
+```{r}
+hc <- hindcast(mod, type = 'latent_N')
+```
+
+Plot some of them to see how the model has performed
+```{r}
+plot_latentN(hc, model_df, 
+             species = 'sp_1',
+             site = 'site_1')
+plot_latentN(hc, model_df, 
+             species = 'sp_1',
+             site = 'site_2')
+plot_latentN(hc, model_df, 
+             species = 'sp_1',
+             site = 'site_3')
+plot_latentN(hc, model_df, 
+             species = 'sp_1',
+             site = 'site_4')
+plot_latentN(hc, model_df, 
+             species = 'sp_2',
+             site = 'site_1')
+plot_latentN(hc, model_df, 
+             species = 'sp_2',
+             site = 'site_2')
+plot_latentN(hc, model_df, 
+             species = 'sp_2',
+             site = 'site_3')
+plot_latentN(hc, model_df, 
+             species = 'sp_2',
+             site = 'site_4')
+```
+
+## Model evaluation
+Evaluate latent abundance predictions by computing the median Continuous Rank Probability Score for each combination
+```{r}
+scores_N <- score_latentN(hc, model_df)
+scores_N
+```
+
+Evaluate how well the model estimated the nonlinear detection functions by computing a multivariate proper scoring rule that penalizes estimates if they do not capture the true correlation structure in the simulated function's basis expansion, and if they are not well calibrated (using an evenly weighted combination of the Variogram and Energy scores)
+```{r}
+scores_det <- score_detection(mod, simdat)
+scores_det
+```
+
+## What next?
+Obviously the model does well here, but some more rigorous testing is required. A proposed simulation strategy would be to run 20 or so iterations at each of:  
+    
+- 8 sites   
+- 2 species   
+- Normal(50, 5)[25, 100] base $\lambda$ per site*species combo  
+- 2, 3, 4 replicates per time period    
+- 6, 8, 10 total time periods     
+- 0.2, 0.4, 0.6 base $p$    
+  
+For each iteration I'll fit models using splines for covariate effects as well as those that assume linear or polynomial effects to see how inferences change and to use the above evaluations. This should provide a start to understand under what conditions could we accurately detect nonlinear effects and how are inferences of latent abundances biased as detection probabilities change
+

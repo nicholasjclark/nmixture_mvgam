@@ -2,6 +2,7 @@
 # Required libraries:
 # insight
 # reshape2
+# tidyr
 # mvnfast
 # scales
 # extraDistr
@@ -29,7 +30,7 @@ simdat <- simulate_nmix(n_sites = 8,
                         n_species = 2,
                         n_replicates = 4,
                         prop_missing = 0,
-                        base_detprob = 0.20,
+                        base_detprob = 0.40,
                         base_lambda = 50)
 
 # Inspect the observed and true count distributions
@@ -99,10 +100,11 @@ ggplot(model_df %>%
 # Model the data using mvgam()
 mod <- mvgam(formula = obs_count ~
                # Each species' detection prob can have a different nonlinear 
-               # association with rainfall; estimate with a hierarchical
-               # GAM to allow for partial pooling of functions
-               s(rainfall, k = 4) +
-               s(rainfall, species, bs = 'fs', k = 4),
+               # association with rainfall; use the 'by' version here to force
+               # each smooth to be zero-centred (i.e. centred about the detection
+               # intercept); this allows us to use prior knowledge so we can
+               # place a more informative prior on the detection prob intercept
+               s(rainfall, by = species, k = 4),
              
              trend_formula = ~ 
                # Hierarchical intercepts for each species*site combination
@@ -118,17 +120,17 @@ mod <- mvgam(formula = obs_count ~
              trend_model = AR(),
              
              # Regularize key model parameters using informative priors
-             priors = c(prior(normal(-0.5, 0.5), class = Intercept),
+             priors = c(prior(student_t(4, -1.5, 0.25), class = Intercept),
                         prior(std_normal(), class = b),
                         prior(normal(20, 10), class = lambda),
                         prior(exponential(1), class = sigma_raw_trend),
-                        prior(normal(4, 1.5), class = Intercept_trend),
-                        prior(exponential(1), class = sigma)),
+                        prior(normal(4, 0.5), class = Intercept_trend),
+                        prior(exponential(10), class = sigma)),
              trend_map = trend_map,
              family = nmix(),
              algorithm = 'meanfield',
              return_model_data = TRUE,
-             samples = 1000,
+             samples = 100,
              data = model_df)
 
 # Parameter summaries (ignoring spline coefficients)
@@ -150,7 +152,6 @@ plot_predictions(mod, condition = list('temperature',
                  type = 'link',
                  conf_level = 0.2) +
   ylab('Expected latent abundance (N)')
-mcmc_plot(mod, variable = 'temperature', regex = TRUE)
 simdat$abund_params$temps
 
 plot_predictions(mod, condition = c('rainfall',
@@ -160,11 +161,18 @@ plot_predictions(mod, condition = c('rainfall',
   ylim(c(0, 1))
 plot_rainfuncs(simdat)
 
-# Plot some of the latent N predictions vs the simulated truths
+# Calculate latent N predictions for each site*species combination
 hc <- hindcast(mod, type = 'latent_N')
+hc2 <- hindcast(mod, type = 'link')
+
+# Plot some of them
 plot_latentN(hc, model_df, 
              species = 'sp_1',
              site = 'site_1')
+plot_latentN(hc2, model_df, 
+             species = 'sp_1',
+             site = 'site_1')
+
 plot_latentN(hc, model_df, 
              species = 'sp_1',
              site = 'site_2')
@@ -187,6 +195,49 @@ plot_latentN(hc, model_df,
 plot_latentN(hc, model_df, 
              species = 'sp_2',
              site = 'site_4')
+
+model_output <- mod$model_output
+Z <- mod$model_data$Z
+n_lv <- mod$n_lv
+K_inds <- mod$model_data$K_inds_all
+obs_data <- mod$obs_data; test_data <- NULL
+
+sp <- 4
+inds <- seq(sp,
+    dim(mvgam:::mcmc_chains(mod$model_output, 'ypred'))[2],
+    by = NCOL(mod$ytimes))
+hcs <- mvgam:::mcmc_chains(mod$model_output, 'latent_ypred')
+dimnames(hcs)
+dimnames(mvgam:::mcmc_chains(mod$model_output, 'trend'))
+plot('n', ylim = c(0, 100),
+     xlim = c(1, 6))
+for(i in 1:50){
+  lines(hcs[i, inds])
+}
+points(model_df %>%
+         dplyr::filter(series == !!levels(model_df$series)[sp]) %>%
+         dplyr::arrange(time) %>%
+         dplyr::pull(true_count),
+       pch = 16, col = 'red')
+for(i in 1:50){
+  lines(latentypreds[i, inds], col = 'grey')
+}
+
+model_output@sim$samples[[1]] <- 
+  model_output@sim$samples[[1]][,-grep('latent_ypred', names(model_output@sim$samples[[1]]))]
+
+# Evaluation
+# Evaluate latent N predictions by computing the median Continuous 
+# Rank Probability Score for each combination
+scores_N <- score_latentN(hc, model_df)
+scores_N
+
+# Evaluate how well the model estimated the nonlinear detection functions
+# by computing a multivariate proper scoring rule that penalizes estimates
+# if they do not capture the true correlation structure in the simulated 
+# function's basis expansion, and if they are not well calibrated
+scores_det <- score_detection(mod, simdat)
+scores_det
 
 # Proposed simulation strategy
 # 20 iterations at each of:

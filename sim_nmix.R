@@ -29,6 +29,105 @@ plot_counts = function(simdat){
                scales = 'free_y') + theme(legend.position = 'none')
 }
 
+# Function to compute the multivariate score for evaluating a model's 
+# ability to correctly estimate the nonlinear detection functions; this score
+# is an evenly-weighted combination of the variogram score (to evaluate the 
+# predicted function's correctness based on how well it captures the true correlations
+# in the simulated basis) and the energy score (to evaluate the 
+# predicted function's correctness based on how well its uncertainty is calibrated against
+# the simulated basis)
+score_detection = function(model, simdat){
+  
+  # Compute true functions over a large grid of rainfall values
+  n_species <- length(unique(simdat$model_df$species))
+  all_species <- unique(simdat$model_df$species)
+  simrain <- seq(min(simdat$model_df$rainfall), 
+                 max(simdat$model_df$rainfall), 
+                 length.out = 100)
+  sim_funcs <- do.call(rbind, lapply(seq_len(n_species), function(species){
+    data.frame(rainfall = simrain,
+               y = rainfall_function(simdat$detection_params$alphas[species],
+                                     simdat$detection_params$linrainfalls[species],
+                                     simdat$detection_params$quadrainfalls[species],
+                                     simdat$detection_params$cubrainfalls[species],
+                                     simrain),
+               species = all_species[species])
+  }))
+  
+  # Predict Pr(detection) estimates from the model at the same rainfall values
+  newdata <- datagrid(rainfall = simrain, 
+                      species = all_species, 
+                      model = mod)
+  preds <- predict(mod, newdata = newdata, type = 'detection')
+  
+  # For each species, compute the scores
+  varscore_sp = function(species){
+    sim_funcs %>%
+      dplyr::filter(species == !!species) %>%
+      dplyr::arrange(rainfall) %>%
+      dplyr::pull(y) -> truths
+    newdata %>%
+      dplyr::mutate(index = dplyr::row_number()) %>%
+      dplyr::filter(species == !!species) %>%
+      dplyr::arrange(rainfall) %>%
+      dplyr::pull(index) -> pred_indices
+    predictions <- preds[,pred_indices]
+    
+    return(scoringRules::es_sample(y = truths, dat = t(predictions)) *
+             log(scoringRules::vs_sample(y = truths, dat = t(predictions))))
+  }
+  
+  data.frame(species = all_species) %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(varscore_det = varscore_sp(species)) %>%
+    dplyr::ungroup() -> sp_scores
+  
+  return(sp_scores)
+}
+
+# Function to compute the median Continuous Rank Probability Score 
+# for each species*site combination
+score_latentN = function(hindcasts, data){
+  
+  all_species <- unique(data$species)
+  all_sites <- unique(data$site)
+  
+  # Function to compute crps for a site*species combo
+  crps_site_sp = function(site, species){
+    all_series <- unique(data %>%
+                           dplyr::filter(species == !!species,
+                                         site == !!site) %>%
+                           dplyr::pull(series))
+    
+    # Grab the first replicate that represents this series
+    # so we can get the true simulated values
+    series <- as.numeric(all_series[1])
+    truths <- data %>%
+      dplyr::arrange(time, series) %>%
+      dplyr::filter(series == !!levels(data$series)[series]) %>%
+      dplyr::pull(true_count)
+    
+    # In case some replicates have missing observations,
+    # pull out predictions for ALL replicates and average over them
+    hcs <- do.call(rbind, lapply(all_series, function(x){
+      ind <- which(names(hindcasts$hindcasts) %in% as.character(x))
+      hindcasts$hindcasts[[ind]]
+    }))
+    
+    # Calculate the CRPS
+    median(scoringRules::crps_sample(y = truths, dat = t(hcs)))
+  }
+ 
+  # Unique combinations of site and species
+  site_sp_combos <- tidyr::crossing(all_species, all_sites) %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(crps_N = crps_site_sp(site = all_sites,
+                                      species = all_species)) %>%
+    dplyr::ungroup()
+  
+  return(site_sp_combos)
+}
+
 # Function to plot latent abundance estimates vs truth
 plot_latentN = function(hindcasts, data, species = 'sp_1',
                         site = 'site_1'){
@@ -100,7 +199,7 @@ plot_tempfuncs = function(simdat){
                                         simdat$abund_params$temps2[species],
                                         simdat$abund_params$temps3[species],
                                         simtemp),
-               species = paste0('species_', species))
+               species = paste0('sp_', species))
   }))
 
   ggplot(sim_funcs, aes(x = temp,
@@ -130,7 +229,7 @@ plot_rainfuncs = function(simdat){
                                      simdat$detection_params$quadrainfalls[species],
                                      simdat$detection_params$cubrainfalls[species],
                                      simrain),
-               species = paste0('species_', species))
+               species = paste0('sp_', species))
   }))
   
   ggplot(sim_funcs, aes(x = rainfall,
@@ -273,7 +372,7 @@ simulate_nmix = function(n_sites = 5,
   }
   
   # All species respond linearly to long-term temperature change
-  sp_temps <- runif(n_species, 0.15, 0.25) *
+  sp_temps <- runif(n_species, 0.25, 0.35) *
     sample(c(-1, 1), n_species, TRUE)
 
   # Latent abundances at each site and timepoint are made up of
@@ -283,9 +382,9 @@ simulate_nmix = function(n_sites = 5,
                           n_timepoints, n_replicates){
     
     # Species abundances evolve as AR1s plus temperature effects
-    ar1 <- runif(1, 0.25, 0.65)
+    ar1 <- runif(1, 0.25, 0.50)
     linpreds <- log(alpha) + temps * sp_temp
-    errors <- rnorm(n_timepoints, 0, 0.25)
+    errors <- rnorm(n_timepoints, 0, 0.15)
     trend <- vector(length = n_timepoints)
     trend[1] <- linpreds[1]
     for(t in 2:n_timepoints){
